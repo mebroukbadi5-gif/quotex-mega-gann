@@ -4441,7 +4441,7 @@ def build_signal_caption(sig):
     else:
         price_line = ""
     return (
-        f"👑 GANN SIGNAL 👑\n"
+        f"👑 BADICHARTS 👑\n"
         f"{LINE_SEP}\n"
         f"💲 {pretty_symbol(sig['symbol'])}\n"
         f"{dir_emoji} {dir_text}\n"
@@ -4488,7 +4488,7 @@ def build_result_caption(sig, status, entry_candle, mtg_candle=None):
     if result_live is not None:
         price_line += f"📈 Live: {result_live:.5f}\n"
     return (
-        f"👑 GANN RESULT 👑\n"
+        f"👑 BADICHARTS 👑\n"
         f"{LINE_SEP}\n"
         f"💲 {pretty_symbol(sig['symbol'])}\n"
         f"{dir_emoji} {dir_text}\n"
@@ -4510,7 +4510,7 @@ def build_status_message():
     strat_info = STRATEGY_INFO.get(bot_state.strategy, {})
     provider_status = "🔌 Live (Quotex)" if candle_provider and candle_provider.client else "📁 File fallback"
     return (
-        f"📊 GANN BOT STATUS\n"
+        f"📊 BADICHARTS Status\n"
         f"{LINE_SEP}\n"
         f"💚 Status    : Online\n"
         f"🎁 Version   : {BOT_VERSION}\n"
@@ -5424,7 +5424,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
             if history_count % SIGNALS_PER_REPORT == 0:
                 report = build_history_report(last_n=SIGNALS_PER_REPORT)
                 report_caption = (
-                    f"📊 GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
+                    f"📊 BADICHARTS REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
                     f"{LINE_SEP}\n"
                     f"{report}\n"
                     f"{LINE_SEP}\n"
@@ -5478,7 +5478,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
                 won = status in ("WIN", "MTG_WIN")
                 payout_txt = f"+{sig['payout']}%" if won else "-100%"
                 fallback_text = (
-                    f"👑 GANN RESULT 👑\n"
+                    f"👑 BADICHARTS 👑\n"
                     f"{LINE_SEP}\n"
                     f"💲 {pretty_symbol(sig['symbol'])}\n"
                     f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
@@ -5498,7 +5498,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
                     if history_count % SIGNALS_PER_REPORT == 0:
                         report = build_history_report(last_n=SIGNALS_PER_REPORT)
                         report_caption = (
-                            f"GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
+                            f"BADICHARTS REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
                             f"{LINE_SEP}\n"
                             f"{report}\n"
                             f"{LINE_SEP}\n"
@@ -6599,7 +6599,7 @@ def main():
 
     # 8) Start the Telegram bot
     print("=" * 60)
-    print("STARTING GANN SIGNAL BOT (auto-signal mode)")
+    print("STARTING BADICHARTS BOT (auto-signal mode)")
     print(f"  VERSION     : {BOT_VERSION}")
     print(f"  ENGINE      : GANN (confluence-based, min={USER_MIN_CONFLUENCE})")
     print(f"  TIMEFRAME   : M1 (1 minute)")
