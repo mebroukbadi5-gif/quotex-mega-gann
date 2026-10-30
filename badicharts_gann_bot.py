@@ -4433,36 +4433,38 @@ def pair_display(symbol):
 
 def build_signal_caption(sig):
     is_buy = sig["direction"] == "BUY"
-    dir_emoji = "UP" if is_buy else "DOWN"
-    dir_text = "CALL" if is_buy else "PUT"
+    dir_emoji = "🔼" if is_buy else "🔽"
+    dir_text = "CALL ↑" if is_buy else "PUT ↓"
     live_price = sig.get("live_price")
     if live_price is not None:
-        price_line = f"Price: {live_price:.5f}\n"
+        price_line = f"💵 Price: {live_price:.5f}\n"
     else:
         price_line = ""
     return (
-        f"GANN SIGNAL\n"
+        f"👑 GANN SIGNAL 👑\n"
         f"{LINE_SEP}\n"
-        f"Asset: {pretty_symbol(sig['symbol'])}\n"
-        f"Direction: {dir_emoji} {dir_text}\n"
-        f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
-        f"Period: M1\n"
-        f"Strength: {sig['strength']}%\n"
-        f"Payout: {sig['payout']}%\n"
+        f"💲 {pretty_symbol(sig['symbol'])}\n"
+        f"{dir_emoji} {dir_text}\n"
+        f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+        f"⏱️ Period: M1\n"
+        f"🔥 Strength: {sig['strength']}%\n"
+        f"🤑 Payout: {sig['payout']}%\n"
         f"{price_line}"
         f"{LINE_SEP}\n"
-        f"QUOTEX"
+        f"🏦 QUOTEX"
     )
 
 
 def build_result_caption(sig, status, entry_candle, mtg_candle=None):
     """Build the result caption showing entry + martingale candles separately."""
     is_buy = sig["direction"] == "BUY"
-    dir_text = "CALL" if is_buy else "PUT"
+    dir_emoji = "🔼" if is_buy else "🔽"
+    dir_text = "CALL ↑" if is_buy else "PUT ↓"
     won = status in ("WIN", "MTG_WIN")
     label = {"WIN": "WIN", "MTG_WIN": "MTG WIN", "LOSS": "LOSS"}[status]
     payout_txt = f"+{sig['payout']}%" if won else "-100%"
-    result_emoji = "WON" if won else "LOST"
+    result_emoji = "✅" if won else "❌"
+    thumb = "👍" if won else "👎"
     ended = sig["entry_time"] + timedelta(seconds=CANDLE_SECONDS * (1 if status == "WIN" else 2))
     price_line = ""
     if entry_candle is not None:
@@ -4470,35 +4472,35 @@ def build_result_caption(sig, status, entry_candle, mtg_candle=None):
         e_close = entry_candle.get("close")
         if e_open is not None and e_close is not None:
             entry_won = candle_wins(sig["direction"], entry_candle)
-            entry_marker = "WON" if entry_won else "LOST"
-            price_line += f"Entry Candle [{entry_marker}]\n  Open={e_open:.5f}  Close={e_close:.5f}\n"
+            entry_marker = "✅" if entry_won else "❌"
+            price_line += f"🕯️ Entry Candle {entry_marker}\n   O={e_open:.5f}  C={e_close:.5f}\n"
     if mtg_candle is not None and status in ("MTG_WIN", "LOSS"):
         if mtg_candle.get("_placeholder"):
-            price_line += f"Martingale [N/A]\n  (data not available from Quotex)\n"
+            price_line += f"💰 Martingale ⚠️\n   (data not available from Quotex)\n"
         else:
             m_open = mtg_candle.get("open")
             m_close = mtg_candle.get("close")
             if m_open is not None and m_close is not None:
                 mtg_won = candle_wins(sig["direction"], mtg_candle)
-                mtg_marker = "WON" if mtg_won else "LOST"
-                price_line += f"Martingale [{mtg_marker}]\n  Open={m_open:.5f}  Close={m_close:.5f}\n"
+                mtg_marker = "✅" if mtg_won else "❌"
+                price_line += f"💰 Martingale {mtg_marker}\n   O={m_open:.5f}  C={m_close:.5f}\n"
     result_live = sig.get("result_live_price")
     if result_live is not None:
-        price_line += f"Live: {result_live:.5f}\n"
+        price_line += f"📈 Live: {result_live:.5f}\n"
     return (
-        f"GANN RESULT\n"
+        f"👑 GANN RESULT 👑\n"
         f"{LINE_SEP}\n"
-        f"Asset: {pretty_symbol(sig['symbol'])}\n"
-        f"Direction: {dir_text}\n"
-        f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
-        f"Period: M1\n"
-        f"Ended: {ended.strftime('%H:%M')}\n"
+        f"💲 {pretty_symbol(sig['symbol'])}\n"
+        f"{dir_emoji} {dir_text}\n"
+        f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+        f"⏱️ Period: M1\n"
+        f"⌛ Ended: {ended.strftime('%H:%M')}\n"
         f"{price_line}"
         f"{LINE_SEP}\n"
-        f"Result: {label} [{result_emoji}]\n"
-        f"Payout: {payout_txt}\n"
+        f"{thumb} Result: {label} {result_emoji}\n"
+        f"🤑 Payout: {payout_txt}\n"
         f"{LINE_SEP}\n"
-        f"QUOTEX"
+        f"🏦 QUOTEX"
     )
 
 
@@ -4506,20 +4508,20 @@ def build_status_message():
     total = STATS["wins"] + STATS["losses"]
     wr = f"{STATS['wins'] / total * 100:.0f}%" if total else "--"
     strat_info = STRATEGY_INFO.get(bot_state.strategy, {})
-    provider_status = "Live (Quotex)" if candle_provider and candle_provider.client else "File fallback"
+    provider_status = "🔌 Live (Quotex)" if candle_provider and candle_provider.client else "📁 File fallback"
     return (
-        f"GANN BOT STATUS\n"
+        f"📊 GANN BOT STATUS\n"
         f"{LINE_SEP}\n"
-        f"Status    : Online\n"
-        f"Version   : {BOT_VERSION}\n"
-        f"Engine    : {strat_info.get('name', bot_state.strategy)} ({strat_info.get('accuracy', '?')})\n"
-        f"Candles   : {CHART_CANDLES_COUNT} per chart\n"
-        f"Auto      : 1 signal at a time\n"
-        f"Target    : {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
-        f"Results   : {STATS['wins']}W / {STATS['losses']}L ({wr})\n"
-        f"Selected  : {len(bot_state.selected_pairs)} pairs\n"
-        f"Provider  : {provider_status}\n"
-        f"Min Confluence: {USER_MIN_CONFLUENCE}\n"
+        f"💚 Status    : Online\n"
+        f"🎁 Version   : {BOT_VERSION}\n"
+        f"🧪 Engine    : {strat_info.get('name', bot_state.strategy)} ({strat_info.get('accuracy', '?')})\n"
+        f"🕯️ Candles   : {CHART_CANDLES_COUNT} per chart\n"
+        f"🔄 Auto      : 1 signal at a time\n"
+        f"📎 Target    : {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
+        f"🏁 Results   : {STATS['wins']}W / {STATS['losses']}L ({wr})\n"
+        f"✅ Selected  : {len(bot_state.selected_pairs)} pairs\n"
+        f"📡 Provider  : {provider_status}\n"
+        f"🎯 Min Confluence: {USER_MIN_CONFLUENCE}\n"
     )
 
 
@@ -5373,11 +5375,11 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
             if history_count % SIGNALS_PER_REPORT == 0:
                 report = build_history_report(last_n=SIGNALS_PER_REPORT)
                 report_caption = (
-                    f"GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
+                    f"📊 GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
                     f"{LINE_SEP}\n"
                     f"{report}\n"
                     f"{LINE_SEP}\n"
-                    f"QUOTEX"
+                    f"🏦 QUOTEX"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=report_caption)
@@ -5427,16 +5429,15 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
                 won = status in ("WIN", "MTG_WIN")
                 payout_txt = f"+{sig['payout']}%" if won else "-100%"
                 fallback_text = (
-                    f"GANN RESULT\n"
+                    f"👑 GANN RESULT 👑\n"
                     f"{LINE_SEP}\n"
-                    f"Asset: {pretty_symbol(sig['symbol'])}\n"
-                    f"Direction: {'CALL' if sig['direction']=='BUY' else 'PUT'}\n"
-                    f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+                    f"💲 {pretty_symbol(sig['symbol'])}\n"
+                    f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
                     f"{LINE_SEP}\n"
-                    f"Result: {label}\n"
-                    f"Payout: {payout_txt}\n"
+                    f"{'👍' if status in ('WIN','MTG_WIN') else '👎'} Result: {label}\n"
+                    f"🤑 Payout: {payout_txt}\n"
                     f"{LINE_SEP}\n"
-                    f"QUOTEX"
+                    f"🏦 QUOTEX"
                 )
                 await bot.send_message(chat_id=chat_id, text=fallback_text)
                 # Still add to history since status was determined
