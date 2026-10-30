@@ -3827,18 +3827,21 @@ def generate_signals_for_asset(candles, asset_name):
     return filtered
 
 
-def gann_pick_best_signal(candles, asset_name, max_lookahead=10):
-    """يختار أفضل إشارة Gann للأصل — الإشارة ذات أعلى confluence والأقرب زمنياً.
+def gann_pick_best_signal(candles, asset_name, max_lookahead=1):
+    """يختار أفضل إشارة Gann للأصل — فقط إشارات الدخول خلال الدقيقة التالية.
 
     يعيد tuple (direction, strength, signal_dict) أو (None, 0, None) إن لم توجد إشارة.
 
-    المعايير:
-      - نأخذ الإشارات التي entry_index ضمن آخر شمعة + max_lookahead
-      - نرتبها حسب (confluence تنازلياً، entry_index تصاعدياً)
-      - نختار الأولى = أعلى confluence + أقرب زمنياً
+    المعايير (مطابقة لطلب المستخدم):
+      - نأخذ ONLY الإشارات التي entry_index == n (الشمعة التالية = دخول بعد ~60 ثانية)
+      - هذا يضمن أن البوت يرسل الإشارة قبل الدخول بـ 1 دقيقة بالضبط
+      - لو لا توجد إشارة دخولها الشمعة التالية → نُعيد None (البوت ينتظر)
+
+    max_lookahead الافتراضي = 1 (الشمعة التالية فقط).
+    لو لا توجد إشارة عند n، نحاول n+1 (دقيقتين) كـ fallback أخير.
 
     strength يُحسب كـ:
-      - 50 (base) + (confluence - 3) * 10  ← كل تطابق إضافي فوق الحد الأدنى يضيف 10%
+      - 50 (base) + (confluence - 3) * 10
       - capped عند 99%
     """
     if not candles or len(candles) < 20:
@@ -3849,27 +3852,33 @@ def gann_pick_best_signal(candles, asset_name, max_lookahead=10):
         return None, 0, None
 
     n = len(candles)
-    # فقط الإشارات التي entry_index >= n (مستقبلية)
-    future = [s for s in sigs if s["entry_index"] >= n - 1]
-    if not future:
-        # لو لا توجد إشارات مستقبلية، خذ أي إشارة (حتى الماضية) كـ fallback
-        future = sigs
+    # الأولوية 1: إشارات entry_idx == n (الدخول في الشمعة التالية = ~60 ثانية)
+    # هذه هي الإشارات التي يجب إرسالها الآن (قبل الدخول بدقيقة)
+    immediate = [s for s in sigs if s["entry_index"] == n]
+    if immediate:
+        # اختر أعلى confluence
+        immediate.sort(key=lambda x: (-x["confluence"], x["entry_index"]))
+        best = immediate[0]
+        direction = best["signal"]
+        conf = best["confluence"]
+        strength = min(99, max(50, 50 + (conf - 3) * 10))
+        return direction, strength, best
 
-    # حدّ الإشارات بـ max_lookahead شموع للمستقبل
-    lookahead_limit = n + max_lookahead
-    near = [s for s in future if s["entry_index"] <= lookahead_limit]
-    if not near:
-        near = future[:5]   # أقرب 5 إشارات
+    # الأولوية 2: fallback — إشارة entry_idx == n+1 (دقيقتين)
+    # هذا يحدث نادراً، لكن لو لم نجد إشارة عند n، نحاول n+1
+    near = [s for s in sigs if s["entry_index"] == n + 1]
+    if near:
+        near.sort(key=lambda x: (-x["confluence"], x["entry_index"]))
+        best = near[0]
+        direction = best["signal"]
+        conf = best["confluence"]
+        strength = min(99, max(50, 50 + (conf - 3) * 10))
+        return direction, strength, best
 
-    # ترتيب: confluence تنازلياً، entry_index تصاعدياً (الأقرب أولاً)
-    near.sort(key=lambda x: (-x["confluence"], x["entry_index"]))
-    best = near[0]
+    # لا توجد إشارة دخولها خلال الدقيقتين القادمتين → أرجع None
+    # البوت سينتظر دقيقة ثم يعيد المحاولة
+    return None, 0, None
 
-    direction = best["signal"]   # "BUY" أو "SELL"
-    conf = best["confluence"]
-    # strength = 50 + (conf - 3) * 10، محصور بين 50 و 99
-    strength = min(99, max(50, 50 + (conf - 3) * 10))
-    return direction, strength, best
 
 # ============================================================================
 # SECTION B: LIVE CANDLE PROVIDER (wraps Quotex fetcher on demand)
@@ -5007,7 +5016,12 @@ MTG_LABEL = "Martingale..."
 
 
 def _bd_wait_caption(remaining, label=WAIT_LABEL):
-    remaining = min(59, max(0, int(remaining)))
+    """يبني نص العداد — يعرض دقائق وثواني بدلاً من قمع عند 59."""
+    remaining = max(0, int(remaining))
+    if remaining >= 60:
+        mins = remaining // 60
+        secs = remaining % 60
+        return f"⌛ {label} {mins}m {secs:02d}s"
     return f"⌛ {label} {remaining:02d}s"
 
 
