@@ -3659,12 +3659,16 @@ async def prompt_timeframe() -> Optional[int]:
 import math as _gann_math
 
 GANN_CONFIG = {
-    "lookback":         40,    # آخر 40 شمعة في التحليل
-    "swing_strength":   2,     # قوة fractal
-    "min_confluence":   3,     # أقل عدد تطابقات للإشارة
-    "signal_gap":       4,     # أقل مسافة بين إشارتين
-    "entry_lead_time":  60,    # عرض ⚡ قبل 60 ثانية من الدخول
+    "lookback":         40,    # last 40 candles to analyze
+    "swing_strength":   2,     # fractal strength
+    "min_confluence":   3,     # min confluence matches (configurable 2-10 at startup)
+    "signal_gap":       4,     # min candles between signals
+    "entry_lead_time":  60,    # show ⚡ 60s before entry
 }
+
+# User-configurable min confluence (set at startup via terminal prompt)
+# Range: 2 to 10. Higher = fewer but stronger signals.
+USER_MIN_CONFLUENCE = 3
 
 GANN_NUMBERS = [7, 9, 12, 14, 21, 30, 45, 60, 90, 120, 144, 180, 270, 360]
 FIBONACCI    = [13, 34, 55, 89, 233]
@@ -3792,7 +3796,7 @@ def generate_signals_for_asset(candles, asset_name):
 
         for b in range(s2["i"] + 1, s2["i"] + 200):
             k, sources = confluence_at(families, b)
-            if k >= GANN_CONFIG["min_confluence"]:
+            if k >= USER_MIN_CONFLUENCE:  # user-configurable (2-10)
                 zones_after = b - s2["i"]
                 sig = first_sig if zones_after % 2 == 1 else (
                     "SELL" if first_sig == "BUY" else "BUY")
@@ -4360,36 +4364,22 @@ def save_history():
 
 
 def build_history_report(last_n=10):
-    """يبني تقرير آخر N إشارة + إحصائيات تراكمية.
-
-    الصيغة (مطابقة لطلب المستخدم):
-        02:36 - EURUSD  -  CALL ✅
-        02:41 - CADJPY  -  CALL ✅1
-        02:44 - EURUSD  -  PUT  ✖️
-        ...
-        Win: 60 | Loss: 25 (71%)
-    """
+    """Build report of last N signals + cumulative stats."""
     if not SIGNAL_HISTORY:
-        return "📊 No signals yet."
+        return "No signals yet."
     lines = []
-    # خذ آخر N إشارة
     recent = SIGNAL_HISTORY[-last_n:]
     for entry in recent:
-        # كل سطر: HH:MM - SYMBOL  -  DIR  MARKER
-        # SYMBOL بدون _otc (EUR/USD بدل EURUSD_otc)
         time_str = entry.get("time_str", "??:??")
         symbol = entry.get("symbol", "?")
-        # تحويل EURUSD_otc → EURUSD  (أو EUR/USD لو 6 أحرف)
         sym_clean = symbol.replace("_otc", "").upper()
         if len(sym_clean) == 6 and sym_clean.isalpha():
             sym_display = f"{sym_clean[:3]}/{sym_clean[3:]}"
         else:
             sym_display = sym_clean
-        dir_text = entry.get("dir_text", "?")  # "CALL" أو "PUT"
-        marker = entry.get("marker", "?")      # "✅" أو "✅1" أو "✖️"
-        # محاذاة: SYMBOL بعرض 7 + DIR بعرض 4
+        dir_text = entry.get("dir_text", "?")
+        marker = entry.get("marker", "?")
         lines.append(f"{time_str} - {sym_display:<7} - {dir_text:<4} {marker}")
-    # إحصائيات تراكمية (كل التاريخ، ليس فقط آخر N)
     total_wins = sum(1 for h in SIGNAL_HISTORY if h.get("status") in ("WIN", "MTG_WIN"))
     total_losses = sum(1 for h in SIGNAL_HISTORY if h.get("status") == "LOSS")
     total = total_wins + total_losses
@@ -4443,115 +4433,94 @@ def pair_display(symbol):
 
 def build_signal_caption(sig):
     is_buy = sig["direction"] == "BUY"
-    dir_emoji = "🔼" if is_buy else "🔽"
-    dir_text = "CALL ↑" if is_buy else "PUT ↓"
-    # Live price line (only shown if we have a live price from Quotex)
+    dir_emoji = "UP" if is_buy else "DOWN"
+    dir_text = "CALL" if is_buy else "PUT"
     live_price = sig.get("live_price")
     if live_price is not None:
-        price_line = f"💵 Price: {live_price:.5f}\n"
+        price_line = f"Price: {live_price:.5f}\n"
     else:
         price_line = ""
     return (
-        f"👑 BADICHARTS 👑\n"
+        f"GANN SIGNAL\n"
         f"{LINE_SEP}\n"
-        f"💲 {pretty_symbol(sig['symbol'])}\n"
-        f"{dir_emoji} {dir_text}\n"
-        f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
-        f"⏱️ Period: M1\n"
-        f"🔥 Strength: {sig['strength']}%\n"
-        f"🤑 Payout: {sig['payout']}%\n"
+        f"Asset: {pretty_symbol(sig['symbol'])}\n"
+        f"Direction: {dir_emoji} {dir_text}\n"
+        f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+        f"Period: M1\n"
+        f"Strength: {sig['strength']}%\n"
+        f"Payout: {sig['payout']}%\n"
         f"{price_line}"
         f"{LINE_SEP}\n"
-        f"🏦 QUOTEX"
-    ).replace("\n", "\n")
+        f"QUOTEX"
+    )
 
 
 def build_result_caption(sig, status, entry_candle, mtg_candle=None):
-    """Build the result caption showing entry + martingale candles SEPARATELY.
-
-    FIX #6: the old code used `last_candle` which was `candles[-1]` —
-    in WIN/LOSS-with-martingale cases this was the WRONG candle (the
-    martingale candle, not the entry candle the user actually traded on).
-    Now we show both candles explicitly so the user can verify:
-      - What the entry candle was (the one they traded on)
-      - What the martingale candle was (if applicable)
-    """
+    """Build the result caption showing entry + martingale candles separately."""
     is_buy = sig["direction"] == "BUY"
-    dir_emoji = "🔼" if is_buy else "🔽"
-    dir_text = "CALL ↑" if is_buy else "PUT ↓"
+    dir_text = "CALL" if is_buy else "PUT"
     won = status in ("WIN", "MTG_WIN")
     label = {"WIN": "WIN", "MTG_WIN": "MTG WIN", "LOSS": "LOSS"}[status]
     payout_txt = f"+{sig['payout']}%" if won else "-100%"
-    result_emoji = "✅" if won else "❌"
-    thumb = "👍" if won else "👎"
+    result_emoji = "WON" if won else "LOST"
     ended = sig["entry_time"] + timedelta(seconds=CANDLE_SECONDS * (1 if status == "WIN" else 2))
-    # ── ENTRY CANDLE (the candle the user actually traded on) ──
-    # Show open/close separately so the user can verify the candle direction.
     price_line = ""
     if entry_candle is not None:
         e_open = entry_candle.get("open")
         e_close = entry_candle.get("close")
         if e_open is not None and e_close is not None:
-            # Determine if the entry candle ITSELF won or lost
             entry_won = candle_wins(sig["direction"], entry_candle)
-            entry_marker = "✅" if entry_won else "❌"
-            price_line += f"🕯️ Entry Candle {entry_marker}\n   O={e_open:.5f}  C={e_close:.5f}\n"
-    # ── MARTINGALE CANDLE (only shown if status is MTG_WIN or LOSS) ──
-    # When the entry candle loses, the bot waits for ONE more candle (martingale)
-    # and checks if it wins. We show this candle too so the user can see why
-    # the final result is MTG_WIN or LOSS.
-    # FIX #13: إذا لم تُجلب شمعة المارتينجال (placeholder)، نظهر رسالة
-    # توضّح أن المارتينجال حدث لكن البيانات لم تصل من Quotex.
+            entry_marker = "WON" if entry_won else "LOST"
+            price_line += f"Entry Candle [{entry_marker}]\n  Open={e_open:.5f}  Close={e_close:.5f}\n"
     if mtg_candle is not None and status in ("MTG_WIN", "LOSS"):
-        # FIX #13: تحقق من placeholder
         if mtg_candle.get("_placeholder"):
-            price_line += f"💰 Martingale ⚠️\n   (data not available from Quotex)\n"
+            price_line += f"Martingale [N/A]\n  (data not available from Quotex)\n"
         else:
             m_open = mtg_candle.get("open")
             m_close = mtg_candle.get("close")
             if m_open is not None and m_close is not None:
                 mtg_won = candle_wins(sig["direction"], mtg_candle)
-                mtg_marker = "✅" if mtg_won else "❌"
-                price_line += f"💰 Martingale {mtg_marker}\n   O={m_open:.5f}  C={m_close:.5f}\n"
-    # Live price at result time (if available)
+                mtg_marker = "WON" if mtg_won else "LOST"
+                price_line += f"Martingale [{mtg_marker}]\n  Open={m_open:.5f}  Close={m_close:.5f}\n"
     result_live = sig.get("result_live_price")
     if result_live is not None:
-        price_line += f"📈 Live: {result_live:.5f}\n"
+        price_line += f"Live: {result_live:.5f}\n"
     return (
-        f"👑 BADICHARTS 👑\n"
+        f"GANN RESULT\n"
         f"{LINE_SEP}\n"
-        f"💲 {pretty_symbol(sig['symbol'])}\n"
-        f"{dir_emoji} {dir_text}\n"
-        f"🔜 Entry: {sig['entry_time'].strftime('%H:%M')}\n"
-        f"⏱️ Period: M1\n"
-        f"⌛ Ended: {ended.strftime('%H:%M')}\n"
+        f"Asset: {pretty_symbol(sig['symbol'])}\n"
+        f"Direction: {dir_text}\n"
+        f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+        f"Period: M1\n"
+        f"Ended: {ended.strftime('%H:%M')}\n"
         f"{price_line}"
         f"{LINE_SEP}\n"
-        f"{thumb} Result: {label} {result_emoji}\n"
-        f"🤑 Payout: {payout_txt}\n"
+        f"Result: {label} [{result_emoji}]\n"
+        f"Payout: {payout_txt}\n"
         f"{LINE_SEP}\n"
-        f"🏦 QUOTEX"
-    ).replace("\n", "\n")
+        f"QUOTEX"
+    )
 
 
 def build_status_message():
     total = STATS["wins"] + STATS["losses"]
     wr = f"{STATS['wins'] / total * 100:.0f}%" if total else "--"
     strat_info = STRATEGY_INFO.get(bot_state.strategy, {})
-    provider_status = "🔌 Live (Quotex)" if candle_provider and candle_provider.client else "📁 File fallback"
+    provider_status = "Live (Quotex)" if candle_provider and candle_provider.client else "File fallback"
     return (
-        f"📊 BADICHARTS Status\n"
+        f"GANN BOT STATUS\n"
         f"{LINE_SEP}\n"
-        f"💚 Status   : Online\n"
-        f"🎁 Version  : {BOT_VERSION}\n"
-        f"🧪 Engine   : {strat_info.get('name', bot_state.strategy)} ({strat_info.get('accuracy', '?')})\n"
-        f"🕯️ Candles   : {CHART_CANDLES_COUNT} per chart\n"
-        f"🔄 Auto     : 1 signal at a time\n"
-        f"📎 Target   : {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
-        f"🏁 Results  : {STATS['wins']}W / {STATS['losses']}L ({wr})\n"
-        f"✅ Selected : {len(bot_state.selected_pairs)} pairs\n"
-        f"📡 Provider : {provider_status}\n"
-    ).replace("\n", "\n")
+        f"Status    : Online\n"
+        f"Version   : {BOT_VERSION}\n"
+        f"Engine    : {strat_info.get('name', bot_state.strategy)} ({strat_info.get('accuracy', '?')})\n"
+        f"Candles   : {CHART_CANDLES_COUNT} per chart\n"
+        f"Auto      : 1 signal at a time\n"
+        f"Target    : {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
+        f"Results   : {STATS['wins']}W / {STATS['losses']}L ({wr})\n"
+        f"Selected  : {len(bot_state.selected_pairs)} pairs\n"
+        f"Provider  : {provider_status}\n"
+        f"Min Confluence: {USER_MIN_CONFLUENCE}\n"
+    )
 
 
 def build_welcome_message():
@@ -5324,29 +5293,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         if status == "LOSS": STATS["losses"] += 1
         else: STATS["wins"] += 1
         save_stats()
-
-        # ── GANN HISTORY: أضف الإشارة + نتيجتها إلى السجل ──
-        try:
-            add_to_history(sig, status)
-            history_count = len(SIGNAL_HISTORY)
-            print(f"HISTORY: added {status} for {sig['symbol']} (total: {history_count})")
-            # ── أرسل تقرير كل 10 إشارات ──
-            if history_count % SIGNALS_PER_REPORT == 0:
-                report = build_history_report(last_n=SIGNALS_PER_REPORT)
-                report_caption = (
-                    f"📊 GANN REPORT — آخر {SIGNALS_PER_REPORT} إشارات\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"{report}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🏦 QUOTEX"
-                )
-                try:
-                    await bot.send_message(chat_id=chat_id, text=report_caption)
-                    print(f"OUT report sent (every {SIGNALS_PER_REPORT} signals) — total signals: {history_count}")
-                except Exception as e:
-                    print(f"WARN: failed to send report: {e}")
-        except Exception as e:
-            print(f"WARN: add_to_history failed: {e}")
+        # NOTE: history + report moved to AFTER result photo is sent
 
         # FIX #6: build the result caption with ENTRY candle and MARTINGALE candle
         # shown SEPARATELY. The old code passed `candles[-1]` which was the WRONG
@@ -5414,6 +5361,29 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
             photo.seek(0)
             await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
         print(f"OUT result {status} for {sig['symbol']} (W{STATS['wins']}/L{STATS['losses']}) — lifecycle took {time.time() - lifecycle_start:.0f}s")
+
+        # ── HISTORY + REPORT: send AFTER result photo ──
+        # This ensures the result screenshot is always sent before the report
+        try:
+            add_to_history(sig, status)
+            history_count = len(SIGNAL_HISTORY)
+            print(f"HISTORY: added {status} for {sig['symbol']} (total: {history_count})")
+            if history_count % SIGNALS_PER_REPORT == 0:
+                report = build_history_report(last_n=SIGNALS_PER_REPORT)
+                report_caption = (
+                    f"GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
+                    f"{LINE_SEP}\n"
+                    f"{report}\n"
+                    f"{LINE_SEP}\n"
+                    f"QUOTEX"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=report_caption)
+                    print(f"OUT report sent (every {SIGNALS_PER_REPORT} signals) — total: {history_count}")
+                except Exception as e:
+                    print(f"WARN: failed to send report: {e}")
+        except Exception as e:
+            print(f"WARN: add_to_history failed: {e}")
     except asyncio.CancelledError:
         print(f"LIFECYCLE CANCELLED {sig['symbol']} after {time.time() - lifecycle_start:.0f}s")
         raise
@@ -5647,11 +5617,12 @@ async def _bd_send_signal_to(chat_id, context, symbol=None, direction=None, chec
         return False
     caption = build_signal_caption(sig)
     photo_io = io.BytesIO(png); photo_io.name = f"{sig['symbol']}_chart.png"
+    stop_kb = build_stop_keyboard()  # STOP button on signal message
     MAX_RETRIES = 3; RETRY_DELAY = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             photo_io.seek(0)
-            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, read_timeout=60, write_timeout=60, connect_timeout=30)
+            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
             print(f"OUT signal {sig['direction']} for {sig['symbol']} sent to chat_id={chat_id}")
             _bd_spawn_lifecycle(context.bot, chat_id, sig, message)
             return True
@@ -6058,9 +6029,18 @@ async def analyze_callback(update, context):
 
 
 async def stop_callback(update, context):
+    """STOP button callback — cancels current signal + loop."""
     query = update.callback_query
     await query.answer("Stopping...")
     bot_state.stop_requested = True
+    # Cancel current lifecycle
+    global LAST_LIFECYCLE_TASK
+    if LAST_LIFECYCLE_TASK is not None and not LAST_LIFECYCLE_TASK.done():
+        LAST_LIFECYCLE_TASK.cancel()
+        print("STOP button: cancelled lifecycle")
+    for t in list(LIFECYCLE_TASKS):
+        if not t.done():
+            t.cancel()
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
@@ -6068,10 +6048,13 @@ async def stop_callback(update, context):
     chat_id = query.message.chat_id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="🛑 Signal loop stopped.\n📝 Send /start to begin again.".replace("\n", "\n")
+        text=f"BOT STOPPED\n{LINE_SEP}\nSend /start to resume"
     )
     await _bd_stop_auto_signal_task(context.application)
-    print("CALLBACK stop -> loop stopping")
+    # Reset for restart
+    bot_state.stop_requested = False
+    bot_state.active = False
+    print("STOP button: loop stopping")
 
 
 # ============================================================================
@@ -6079,22 +6062,19 @@ async def stop_callback(update, context):
 # ============================================================================
 
 async def start_command(update, context):
-    """/start — يعرض حالة البوت فقط (لا قوائم).
-
-    البوت يعمل تلقائياً بمجرد إدخال chat_id من التيرمنال.
-    """
+    """/start — show bot status (no menu)."""
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
     print(f"IN  /start from chat_id={chat_id} (type={chat_type})")
-    # اعرض رسالة الحالة فقط
     status = build_status_message()
     extra = (
-        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📡 Signal mode: AUTO\n"
-        f"🎯 Target: {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
-        f"📊 History: {len(SIGNAL_HISTORY)} signals\n"
-        f"⏱️ Report every: {SIGNALS_PER_REPORT} signals\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n{LINE_SEP}\n"
+        f"Signal mode: AUTO\n"
+        f"Target: {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
+        f"History: {len(SIGNAL_HISTORY)} signals\n"
+        f"Report every: {SIGNALS_PER_REPORT} signals\n"
+        f"Min confluence: {USER_MIN_CONFLUENCE}\n"
+        f"{LINE_SEP}\n"
         f"Commands: /status /stop /id /resetstats"
     )
     await update.message.reply_text(status + extra)
@@ -6120,9 +6100,37 @@ async def resetstats_command(update, context):
 
 
 async def stop_command(update, context):
+    """Stop the bot: cancel current lifecycle + signal loop."""
     bot_state.stop_requested = True
+    # Cancel the current lifecycle task (if any)
+    global LAST_LIFECYCLE_TASK
+    if LAST_LIFECYCLE_TASK is not None and not LAST_LIFECYCLE_TASK.done():
+        LAST_LIFECYCLE_TASK.cancel()
+        try:
+            await LAST_LIFECYCLE_TASK
+        except asyncio.CancelledError:
+            pass
+        print("STOP: cancelled current lifecycle task")
+    # Cancel all pending lifecycle tasks
+    for t in list(LIFECYCLE_TASKS):
+        if not t.done():
+            t.cancel()
+            try: await t
+            except asyncio.CancelledError: pass
+    print(f"STOP: cancelled {len(LIFECYCLE_TASKS)} lifecycle tasks")
+    # Stop the auto-signal loop
     await _bd_stop_auto_signal_task(context.application)
-    await update.message.reply_text("🛑 AUTO-SIGNAL stopped. Send /start to begin again.")
+    await update.message.reply_text(
+        f"BOT STOPPED\n"
+        f"{LINE_SEP}\n"
+        f"Signals: {len(SIGNAL_HISTORY)} total\n"
+        f"Wins: {STATS['wins']} | Losses: {STATS['losses']}\n"
+        f"{LINE_SEP}\n"
+        f"Send /start to resume"
+    )
+    # Reset stop flag so the bot can restart
+    bot_state.stop_requested = False
+    bot_state.active = False
 
 
 async def error_handler(update, context):
@@ -6357,22 +6365,11 @@ def _connect_quotex_blocking(provider: LiveCandleProvider) -> bool:
 
 
 def prompt_for_target_chat_id():
-    """يطلب chat_id من التيرمنال — هذا هو الـ chat_id الذي سيرسل إليه البوت الإشارات.
-
-    بالنسبة لقناة Telegram:
-      - chat_id = -100xxxxxxxxxx (رقم سالب يبدأ بـ -100)
-      - أو username القناة: @my_channel
-    كيف تحصل على chat_id القناة:
-      1. أضف البوت كمسؤول في القناة
-      2. أرسل أي رسالة في القناة
-      3. افتح https://api.telegram.org/bot<TOKEN>/getUpdates
-      4. ابحث عن "chat":{"id":-100xxxxxxxxxx}
-    """
+    """Prompt for target chat_id from terminal."""
     print("=" * 60)
-    print("📞 ENTER TARGET CHAT_ID (القناة أو المحادثة التي سترسل إليها الإشارات)")
-    print("   - للقناة: -100xxxxxxxxxx (رقم سالب يبدأ بـ -100)")
-    print("   - أو username القناة: @my_channel")
-    print("   - اضغط Enter لتخطّي (يمكن إضافته لاحقاً عبر /start)")
+    print("ENTER TARGET CHAT_ID (channel or chat to receive signals)")
+    print("  - For channel: -100xxxxxxxxxx (negative number starting with -100)")
+    print("  - Or channel username: @my_channel")
     print("=" * 60)
     while True:
         try:
@@ -6382,10 +6379,43 @@ def prompt_for_target_chat_id():
             return None
         if not chat_id:
             return ""
-        # قبول: أرقام سالبة، أرقام موجبة، أو @username
         if chat_id.startswith("@") or chat_id.lstrip("-").isdigit():
             return chat_id
-        print("⚠ الصيغة غير صالحة. chat_id يجب أن يكون: رقم (مثل -1001234567890) أو @username")
+        print("Invalid format. chat_id must be a number (e.g. -1001234567890) or @username")
+
+
+def prompt_for_min_confluence():
+    """Prompt for minimum confluence (2-10). Higher = fewer but stronger signals."""
+    global USER_MIN_CONFLUENCE
+    print("=" * 60)
+    print("ENTER MINIMUM CONFLUENCE (2-10)")
+    print("  - This is the minimum number of Gann time projections that must")
+    print("    align at the entry point to generate a signal.")
+    print("  - 2 = more signals (weaker)")
+    print("  - 5 = balanced (recommended)")
+    print("  - 10 = very few signals (very strong)")
+    print("  - Default: 3")
+    print("=" * 60)
+    while True:
+        try:
+            raw = input(f"min_confluence [2-10, default=3] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return False
+        if not raw:
+            USER_MIN_CONFLUENCE = 3
+            print(f"  OK - min_confluence = 3 (default)")
+            return True
+        try:
+            val = int(raw)
+            if 2 <= val <= 10:
+                USER_MIN_CONFLUENCE = val
+                print(f"  OK - min_confluence = {val}")
+                return True
+            else:
+                print("  Value must be between 2 and 10. Try again.")
+        except ValueError:
+            print("  Please enter a valid integer (2-10).")
 
 
 def main():
@@ -6417,44 +6447,49 @@ def main():
         print("       Add them to credentials.json and re-run.")
         return
 
-    # 3) Target chat_id (القناة التي سيرسل إليها الإشارات)
+    # 3) Target chat_id
     target_chat_id = prompt_for_target_chat_id()
     if target_chat_id is None:
         print("Aborted.")
         return
     if not target_chat_id:
-        print("⚠ لا يمكن بدء البوت بدون chat_id. أعد التشغيل وأدخل chat_id.")
+        print("ERROR: Cannot start without chat_id. Restart and enter chat_id.")
         return
     AUTO_SIGNAL_CHAT_ID = target_chat_id
     _bd_save_cache(CHATID_CACHE_FILE, AUTO_SIGNAL_CHAT_ID)
-    print(f"✓ target chat_id set: {AUTO_SIGNAL_CHAT_ID}")
+    print(f"OK - target chat_id set: {AUTO_SIGNAL_CHAT_ID}")
 
-    # 4) Purge old Quotex session
-    print("Purging old Quotex session (session.json + browser/)...")
+    # 4) Min confluence (2-10)
+    if not prompt_for_min_confluence():
+        return
+    print(f"OK - GANN engine will use min_confluence = {USER_MIN_CONFLUENCE}")
+
+    # 5) Purge old Quotex session
+    print("Purging old Quotex session...")
     purge_old_session()
 
-    # 5) Connect to Quotex (blocking — never gives up)
+    # 6) Connect to Quotex (blocking — never gives up)
     candle_provider = LiveCandleProvider(email=q_email, password=q_password, proxies=q_proxy or None)
     print(f"LiveCandleProvider initialized for {q_email}")
     _connect_quotex_blocking(candle_provider)
 
-    # 6) Auto-select ALL 13 OTC pairs + Gann strategy
+    # 7) Auto-select ALL 13 OTC pairs + Gann strategy
     bot_state.strategy = "quantvexa"   # GANN ENGINE
     bot_state.selected_pairs = set(s for s, _ in PAIR_LIST)
     bot_state.stop_requested = False
-    print(f"✓ Auto-selected: {len(bot_state.selected_pairs)} OTC pairs (all)")
+    print(f"OK - Auto-selected: {len(bot_state.selected_pairs)} OTC pairs (all)")
 
-    # 7) Start the Telegram bot
+    # 8) Start the Telegram bot
     print("=" * 60)
     print("STARTING GANN SIGNAL BOT (auto-signal mode)")
-    print(f"   VERSION    : {BOT_VERSION}")
-    print(f"   ENGINE     : GANN (confluence-based)")
-    print(f"   TIMEFRAME  : M1 (1 minute)")
-    print(f"   TARGET     : {AUTO_SIGNAL_CHAT_ID}")
-    print(f"   PAIRS      : {len(bot_state.selected_pairs)} (ALL 13 OTC)")
-    print(f"   RESULTS    : {STATS['wins']}W / {STATS['losses']}L (history: {len(SIGNAL_HISTORY)})")
-    print(f"   REPORT     : every {SIGNALS_PER_REPORT} signals")
-    print(f"   PROVIDER   : Quotex live (connected)")
+    print(f"  VERSION     : {BOT_VERSION}")
+    print(f"  ENGINE      : GANN (confluence-based, min={USER_MIN_CONFLUENCE})")
+    print(f"  TIMEFRAME   : M1 (1 minute)")
+    print(f"  TARGET      : {AUTO_SIGNAL_CHAT_ID}")
+    print(f"  PAIRS       : {len(bot_state.selected_pairs)} (ALL 13 OTC)")
+    print(f"  RESULTS     : {STATS['wins']}W / {STATS['losses']}L (history: {len(SIGNAL_HISTORY)})")
+    print(f"  REPORT      : every {SIGNALS_PER_REPORT} signals")
+    print(f"  PROVIDER    : Quotex live (connected)")
     print("=" * 60)
 
     app = (Application.builder()
