@@ -5354,9 +5354,9 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         # LOSS-with-martingale cases.
         result_caption = build_result_caption(sig, status, c1, mtg_candle_for_caption)
         reply = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
-        stop_kb = build_stop_keyboard()
+        # NO STOP BUTTON — same reason as signal messages (public channel)
         try:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
         except Exception as e:
             photo.seek(0)
             await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
@@ -5617,12 +5617,13 @@ async def _bd_send_signal_to(chat_id, context, symbol=None, direction=None, chec
         return False
     caption = build_signal_caption(sig)
     photo_io = io.BytesIO(png); photo_io.name = f"{sig['symbol']}_chart.png"
-    stop_kb = build_stop_keyboard()  # STOP button on signal message
+    # NO STOP BUTTON — bot runs in a public channel, any subscriber clicking
+    # STOP would halt the bot for everyone. Owner controls via /stop in PM.
     MAX_RETRIES = 3; RETRY_DELAY = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             photo_io.seek(0)
-            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, read_timeout=60, write_timeout=60, connect_timeout=30)
             print(f"OUT signal {sig['direction']} for {sig['symbol']} sent to chat_id={chat_id}")
             _bd_spawn_lifecycle(context.bot, chat_id, sig, message)
             return True
