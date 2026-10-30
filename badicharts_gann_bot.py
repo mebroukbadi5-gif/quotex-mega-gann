@@ -5354,9 +5354,9 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         # LOSS-with-martingale cases.
         result_caption = build_result_caption(sig, status, c1, mtg_candle_for_caption)
         reply = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
-        # NO STOP BUTTON — same reason as signal messages (public channel)
+        stop_kb = build_stop_keyboard()  # STOP button visible but DISABLED
         try:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
         except Exception as e:
             photo.seek(0)
             await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
@@ -5617,13 +5617,12 @@ async def _bd_send_signal_to(chat_id, context, symbol=None, direction=None, chec
         return False
     caption = build_signal_caption(sig)
     photo_io = io.BytesIO(png); photo_io.name = f"{sig['symbol']}_chart.png"
-    # NO STOP BUTTON — bot runs in a public channel, any subscriber clicking
-    # STOP would halt the bot for everyone. Owner controls via /stop in PM.
+    stop_kb = build_stop_keyboard()  # STOP button visible but DISABLED for channel safety
     MAX_RETRIES = 3; RETRY_DELAY = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             photo_io.seek(0)
-            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, read_timeout=60, write_timeout=60, connect_timeout=30)
+            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
             print(f"OUT signal {sig['direction']} for {sig['symbol']} sent to chat_id={chat_id}")
             _bd_spawn_lifecycle(context.bot, chat_id, sig, message)
             return True
@@ -6030,32 +6029,19 @@ async def analyze_callback(update, context):
 
 
 async def stop_callback(update, context):
-    """STOP button callback — cancels current signal + loop."""
+    """STOP button callback — DISABLED in channel mode.
+    
+    The button is visible on every signal/result message for aesthetics,
+    but clicking it does NOT stop the bot. Only the owner can stop via
+    /stop in a private chat with the bot.
+    """
     query = update.callback_query
-    await query.answer("Stopping...")
-    bot_state.stop_requested = True
-    # Cancel current lifecycle
-    global LAST_LIFECYCLE_TASK
-    if LAST_LIFECYCLE_TASK is not None and not LAST_LIFECYCLE_TASK.done():
-        LAST_LIFECYCLE_TASK.cancel()
-        print("STOP button: cancelled lifecycle")
-    for t in list(LIFECYCLE_TASKS):
-        if not t.done():
-            t.cancel()
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    chat_id = query.message.chat_id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"BOT STOPPED\n{LINE_SEP}\nSend /start to resume"
+    # Just show a popup — do NOT stop the bot
+    await query.answer(
+        "This button is disabled. Only the bot owner can stop via /stop in PM.",
+        show_alert=True
     )
-    await _bd_stop_auto_signal_task(context.application)
-    # Reset for restart
-    bot_state.stop_requested = False
-    bot_state.active = False
-    print("STOP button: loop stopping")
+    print(f"STOP button clicked by user {query.from_user.id} — IGNORED (channel mode)")
 
 
 # ============================================================================
