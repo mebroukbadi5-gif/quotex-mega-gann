@@ -4934,12 +4934,61 @@ def build_pair_keyboard():
 
 
 def build_stop_keyboard():
-    """Red STOP button — shown below each result.
-    Uses KeyboardButtonStyle.DANGER for NATIVE red background.
-    """
+    """Deprecated — kept for compatibility."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛑 STOP", callback_data="stop", style=STYLE_RED)]
     ])
+
+
+def build_feedback_keyboard():
+    """GOOD/BAD feedback buttons — shown ONLY under the RESULT message.
+    - 🟢 GOOD (green) = user liked the signal
+    - 🔴 BAD (red) = user didn't like the signal
+    When clicked, the signal info is saved to a feedback log file.
+    """
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟢 GOOD", callback_data="feedback:good", style=STYLE_GREEN),
+            InlineKeyboardButton("🔴 BAD", callback_data="feedback:bad", style=STYLE_RED),
+        ]
+    ])
+
+
+# Feedback log file — stores user feedback on signals
+FEEDBACK_FILE = Path(__file__).parent / ".badicharts_feedback.json"
+
+
+def log_feedback(symbol: str, direction: str, status: str, feedback: str, user_id: int):
+    """Save user feedback to a JSON log file.
+    Each entry: {timestamp, symbol, direction, status, feedback, user_id}
+    """
+    try:
+        existing = []
+        if FEEDBACK_FILE.exists():
+            try:
+                existing = json.loads(FEEDBACK_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                existing = []
+        entry = {
+            "timestamp": int(time.time()),
+            "datetime": datetime.now().isoformat(timespec="seconds"),
+            "symbol": symbol,
+            "direction": direction,
+            "status": status,
+            "feedback": feedback,  # "good" or "bad"
+            "user_id": user_id,
+        }
+        existing.append(entry)
+        # Keep last 1000 entries
+        if len(existing) > 1000:
+            existing = existing[-1000:]
+        FEEDBACK_FILE.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        print(f"FEEDBACK: {feedback} for {symbol} ({direction}, {status}) by user {user_id}")
+    except Exception as e:
+        print(f"WARN: failed to log feedback: {e}")
 
 
 # ============================================================================
@@ -5357,12 +5406,12 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         # LOSS-with-martingale cases.
         result_caption = build_result_caption(sig, status, c1, mtg_candle_for_caption)
         reply = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
-        stop_kb = build_stop_keyboard()  # STOP button visible but DISABLED
+        feedback_kb = build_feedback_keyboard()  # GOOD/BAD buttons under result only
         try:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=feedback_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
         except Exception as e:
             photo.seek(0)
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=feedback_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
         print(f"OUT result {status} for {sig['symbol']} (W{STATS['wins']}/L{STATS['losses']}) — lifecycle took {time.time() - lifecycle_start:.0f}s")
         result_sent = True  # mark result as sent for safety net
 
@@ -5663,12 +5712,12 @@ async def _bd_send_signal_to(chat_id, context, symbol=None, direction=None, chec
         return False
     caption = build_signal_caption(sig)
     photo_io = io.BytesIO(png); photo_io.name = f"{sig['symbol']}_chart.png"
-    stop_kb = build_stop_keyboard()  # STOP button visible but DISABLED for channel safety
+    # NO buttons on signal message — user requested clean signal messages
     MAX_RETRIES = 3; RETRY_DELAY = 3
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             photo_io.seek(0)
-            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, reply_markup=stop_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+            message = await context.bot.send_photo(chat_id=chat_id, photo=photo_io, caption=caption, read_timeout=60, write_timeout=60, connect_timeout=30)
             print(f"OUT signal {sig['direction']} for {sig['symbol']} sent to chat_id={chat_id}")
             _bd_spawn_lifecycle(context.bot, chat_id, sig, message)
             return True
@@ -6075,19 +6124,55 @@ async def analyze_callback(update, context):
 
 
 async def stop_callback(update, context):
-    """STOP button callback — DISABLED in channel mode.
+    """STOP button callback — DISABLED (kept for compatibility)."""
+    query = update.callback_query
+    await query.answer("This button is disabled.", show_alert=True)
+
+
+async def feedback_callback(update, context):
+    """GOOD/BAD feedback button callback.
     
-    The button is visible on every signal/result message for aesthetics,
-    but clicking it does NOT stop the bot. Only the owner can stop via
-    /stop in a private chat with the bot.
+    When a user clicks 🟢 GOOD or 🔴 BAD under a result message:
+    1. The signal info + feedback is saved to .badicharts_feedback.json
+    2. A popup thanks the user
+    3. The buttons are removed from the message (so they can't click twice)
     """
     query = update.callback_query
-    # Just show a popup — do NOT stop the bot
-    await query.answer(
-        "This button is disabled. Only the bot owner can stop via /stop in PM.",
-        show_alert=True
-    )
-    print(f"STOP button clicked by user {query.from_user.id} — IGNORED (channel mode)")
+    user_id = query.from_user.id
+    # Parse feedback type: "feedback:good" or "feedback:bad"
+    feedback_type = query.data.split(":", 1)[1] if ":" in query.data else "unknown"
+    
+    # Extract signal info from the message caption
+    # The caption contains: Asset, Direction, Entry, Result, Payout
+    caption = query.message.caption or ""
+    symbol = "?"
+    direction = "?"
+    status = "?"
+    for line in caption.split("\n"):
+        if line.startswith("💲"):
+            symbol = line.replace("💲", "").strip()
+        elif line.startswith("🔼") or line.startswith("🔽"):
+            direction = line.strip()
+        elif "Result:" in line:
+            status = line.split("Result:")[1].strip()
+    
+    # Log the feedback
+    log_feedback(symbol, direction, status, feedback_type, user_id)
+    
+    # Show popup
+    if feedback_type == "good":
+        popup_text = "✅ Thanks! You rated this signal as GOOD."
+    else:
+        popup_text = "❌ Thanks! You rated this signal as BAD."
+    await query.answer(popup_text, show_alert=True)
+    
+    # Remove the buttons (so user can't click twice)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    
+    print(f"FEEDBACK: {feedback_type} by user {user_id} for {symbol}")
 
 
 # ============================================================================
@@ -6537,6 +6622,8 @@ def main():
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("resetstats", resetstats_command))
+    app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback:"))
+    app.add_handler(CallbackQueryHandler(stop_callback, pattern="^stop$"))
     app.add_error_handler(error_handler)
 
     # ابدأ حلقة الإشارات فوراً بعد بناء الـ app (في post_init)
@@ -6562,6 +6649,8 @@ def main():
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("resetstats", resetstats_command))
+    app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback:"))
+    app.add_handler(CallbackQueryHandler(stop_callback, pattern="^stop$"))
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
