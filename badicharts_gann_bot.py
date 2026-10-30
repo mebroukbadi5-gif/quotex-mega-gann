@@ -3827,18 +3827,16 @@ def generate_signals_for_asset(candles, asset_name):
     return filtered
 
 
-def gann_pick_best_signal(candles, asset_name, max_lookahead=1):
-    """يختار أفضل إشارة Gann للأصل — فقط إشارات الدخول خلال الدقيقة التالية.
+def gann_pick_best_signal(candles, asset_name, max_lookahead=5):
+    """يختار أفضل إشارة Gann للأصل — أقرب إشارة مستقبلية (حتى 5 دقائق).
 
     يعيد tuple (direction, strength, signal_dict) أو (None, 0, None) إن لم توجد إشارة.
 
     المعايير (مطابقة لطلب المستخدم):
-      - نأخذ ONLY الإشارات التي entry_index == n (الشمعة التالية = دخول بعد ~60 ثانية)
-      - هذا يضمن أن البوت يرسل الإشارة قبل الدخول بـ 1 دقيقة بالضبط
-      - لو لا توجد إشارة دخولها الشمعة التالية → نُعيد None (البوت ينتظر)
-
-    max_lookahead الافتراضي = 1 (الشمعة التالية فقط).
-    لو لا توجد إشارة عند n، نحاول n+1 (دقيقتين) كـ fallback أخير.
+      - نبحث عن إشارات entry_idx > n (مستقبلية) خلال 5 شموع قادمة
+      - نرتبها حسب entry_idx تصاعدياً (الأقرب أولاً) ثم confluence تنازلياً
+      - نعيد الأقرب زمنياً — البوت سينتظر حتى entry_time - 61 ثانية لإرسالها
+      - هذا يضمن أن الإشارة تُرسل قبل الدخول بدقيقة + ثانية
 
     strength يُحسب كـ:
       - 50 (base) + (confluence - 3) * 10
@@ -3852,32 +3850,19 @@ def gann_pick_best_signal(candles, asset_name, max_lookahead=1):
         return None, 0, None
 
     n = len(candles)
-    # الأولوية 1: إشارات entry_idx == n (الدخول في الشمعة التالية = ~60 ثانية)
-    # هذه هي الإشارات التي يجب إرسالها الآن (قبل الدخول بدقيقة)
-    immediate = [s for s in sigs if s["entry_index"] == n]
-    if immediate:
-        # اختر أعلى confluence
-        immediate.sort(key=lambda x: (-x["confluence"], x["entry_index"]))
-        best = immediate[0]
-        direction = best["signal"]
-        conf = best["confluence"]
-        strength = min(99, max(50, 50 + (conf - 3) * 10))
-        return direction, strength, best
+    # إشارات entry_idx في [n, n+max_lookahead] (مستقبلية قريبة)
+    future = [s for s in sigs if n <= s["entry_index"] <= n + max_lookahead]
+    if not future:
+        return None, 0, None
 
-    # الأولوية 2: fallback — إشارة entry_idx == n+1 (دقيقتين)
-    # هذا يحدث نادراً، لكن لو لم نجد إشارة عند n، نحاول n+1
-    near = [s for s in sigs if s["entry_index"] == n + 1]
-    if near:
-        near.sort(key=lambda x: (-x["confluence"], x["entry_index"]))
-        best = near[0]
-        direction = best["signal"]
-        conf = best["confluence"]
-        strength = min(99, max(50, 50 + (conf - 3) * 10))
-        return direction, strength, best
+    # ترتيب: entry_idx تصاعدياً (الأقرب أولاً) ثم confluence تنازلياً
+    future.sort(key=lambda x: (x["entry_index"], -x["confluence"]))
+    best = future[0]
 
-    # لا توجد إشارة دخولها خلال الدقيقتين القادمتين → أرجع None
-    # البوت سينتظر دقيقة ثم يعيد المحاولة
-    return None, 0, None
+    direction = best["signal"]
+    conf = best["confluence"]
+    strength = min(99, max(50, 50 + (conf - 3) * 10))
+    return direction, strength, best
 
 
 # ============================================================================
@@ -4863,45 +4848,44 @@ def build_signal(direction=None, symbol=None, payout=None, display_candles=None,
     for c in candles:
         if not c.get('volume') or c['volume'] == 0:
             c['volume'] = int(avg_volume)
-    # GANN ENTRY TIME: compute entry_time from Gann signal's entry_index
-    # The Gann engine tells us WHICH candle index will be the entry candle.
-    # entry_index = the position in the candle list (0-based).
-    # entry_time = the START timestamp of that candle.
+    # GANN ENTRY TIME: compute entry_time from the LAST CANDLE'S ACTUAL TIMESTAMP
+    # not from "now + X minutes" (which was off by 1 minute).
     #
-    # If the entry candle is in the FUTURE (entry_index >= total_candle_count),
-    # entry_time = last_candle_time + (entry_index - last_index) * 60 seconds.
+    # Formula: entry_time = last_candle_timestamp + (entry_idx - last_idx) * 60
+    # This gives the EXACT start time of the entry candle.
     #
-    # The bot sends the signal NOW (1 minute before entry) so the user has
-    # time to read it and place the trade.
+    # Example:
+    #   last_candle at 02:20:00 (timestamp T), entry_idx = 24, last_idx = 20
+    #   entry_time = T + (24-20)*60 = T + 4 min = 02:24:00 ✓
     now = datetime.now()
+    # Capture original last candle timestamp BEFORE any re-timing
+    original_last_ts = int(candles[-1].get("time", 0)) if candles else 0
     if gann_signal is not None and total_candle_count is not None:
-        # GANN MODE: compute entry_time from entry_index
+        # GANN MODE: compute entry_time from last candle's actual timestamp
         try:
             entry_idx = int(gann_signal.get("entry_index", 0))
-            # آخر شمعة في القائمة الإجمالية لها index = total_candle_count - 1
             last_idx = total_candle_count - 1
-            # لو entry_idx <= last_idx → إشارة في الماضي، تجاهلها
-            if entry_idx <= last_idx:
-                # Fallback: استخدم الدقيقة التالية من الوقت الحالي
-                entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-            else:
-                # عدد الشموع المستقبلية بين آخر شمعة وشمعة الدخول
+            if entry_idx > last_idx and original_last_ts > 0:
+                # entry_time = last_candle_time + (entry_idx - last_idx) * 60 seconds
                 candles_ahead = entry_idx - last_idx
-                # entry_time = الآن + candles_ahead دقائق (مقرّبة لبداية الدقيقة)
-                # نقوم بالتقريب إلى بداية الدقيقة التالية
-                next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-                entry_time = next_minute + timedelta(minutes=candles_ahead - 1)
-            print(f"GANN entry_time computed: {entry_time.strftime('%H:%M')} (entry_idx={entry_idx}, last_idx={last_idx})")
+                entry_timestamp = original_last_ts + candles_ahead * 60
+                entry_time = datetime.fromtimestamp(entry_timestamp)
+                print(f"GANN entry_time: {entry_time.strftime('%H:%M:%S')} "
+                      f"(entry_idx={entry_idx}, last_idx={last_idx}, "
+                      f"last_candle_ts={datetime.fromtimestamp(original_last_ts).strftime('%H:%M')}, "
+                      f"+{candles_ahead}m)")
+            else:
+                # Fallback: entry_idx <= last_idx (past signal) → next minute
+                entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
         except Exception as e:
             print(f"GANN entry_time calc failed: {e}, falling back to next minute")
             entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     else:
         # LEGACY MODE (no Gann signal): use next minute boundary
         entry_time = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    # enforce MINIMUM 15-second lead time (same as before)
-    lead_seconds = (entry_time - now).total_seconds()
-    if lead_seconds < ENTRY_MIN_LEAD_SECONDS:
-        entry_time = entry_time + timedelta(minutes=1)
+    # NOTE: لا نُطبّق "minimum 15-second lead time" في وضع GANN لأن
+    # entry_time محسوبة بدقة من timestamp آخر شمعة. البوت سينتظر
+    # تلقائياً حتى entry_time - 61 ثانية قبل الإرسال (في auto_signal_loop).
     # Re-time candles so the LAST display candle ends at entry_time
     # (preserves visual continuity on the chart).
     n = len(candles)
@@ -5822,10 +5806,65 @@ async def auto_signal_loop(application):
                     raise
                 continue
 
-            # ترتيب حسب payout (تنازلياً)، ثم strength (تنازلياً) كحسم تعادل
-            valid_signals.sort(key=lambda x: (-x['payout'], -x['strength']))
+            # ترتيب حسب entry_idx تصاعدياً (الأقرب زمنياً أولاً)، ثم confluence تنازلياً
+            # نريد الأقرب زمنياً حتى نرسل الإشارة في وقتها الصحيح
+            valid_signals.sort(key=lambda x: (
+                x.get('gann_signal', {}).get('entry_index', 9999),
+                -x['confluence'] if 'confluence' in x else -x['strength'],
+            ))
             best = valid_signals[0]
-            print(f"AUTO-SIGNAL: 🏆 BEST → {best['symbol']} ({best['direction']}, payout={best['payout']}%, strength={best['strength']}%) — chosen from {len(valid_signals)} valid signal(s)")
+            best_gann = best.get('gann_signal')
+            best_candles = best.get('candles', [])
+            best_entry_idx = best_gann.get('entry_index', 0) if best_gann else 0
+            print(f"AUTO-SIGNAL: 🏆 BEST → {best['symbol']} ({best['direction']}, "
+                  f"payout={best['payout']}%, strength={best['strength']}%, "
+                  f"entry_idx={best_entry_idx}) — chosen from {len(valid_signals)} valid signal(s)")
+
+            # ── STEP 4.5: انتظر حتى entry_time - 61 ثانية قبل الإرسال ──
+            # مثال: entry_time = 02:24:00 → signal_send_time = 02:22:59
+            # البوت ينتظر حتى 02:22:59 ثم يرسل الإشارة
+            # العداد ينزل: 1m 01s → 1m 00s → 59s → ... → 0s
+            # الدخول عند 02:24:00
+            if best_gann and best_candles:
+                try:
+                    entry_idx = int(best_gann.get("entry_index", 0))
+                    n_best = len(best_candles)
+                    last_idx_best = n_best - 1
+                    last_ts_best = int(best_candles[-1].get("time", 0))
+                    if entry_idx > last_idx_best and last_ts_best > 0:
+                        candles_ahead = entry_idx - last_idx_best
+                        entry_timestamp_best = last_ts_best + candles_ahead * 60
+                        entry_time_best = datetime.fromtimestamp(entry_timestamp_best)
+                        # signal_send_time = entry_time - 61 ثانية
+                        # (1 دقيقة + 1 ثانية قبل الدخول)
+                        signal_send_time = entry_time_best - timedelta(seconds=61)
+                        now_dt = datetime.now()
+                        if now_dt < signal_send_time:
+                            wait_secs = (signal_send_time - now_dt).total_seconds()
+                            print(f"AUTO-SIGNAL: ⏳ Signal scheduled at "
+                                  f"{signal_send_time.strftime('%H:%M:%S')} "
+                                  f"(entry at {entry_time_best.strftime('%H:%M:%S')}) "
+                                  f"— waiting {wait_secs:.0f}s before sending")
+                            # انتظر بشكل قابل للإيقاف (تحقق من stop_requested كل 5 ثوانٍ)
+                            end_wait_t = time.time() + wait_secs
+                            while time.time() < end_wait_t:
+                                if bot_state.stop_requested:
+                                    print("AUTO-SIGNAL: stop requested during wait")
+                                    break
+                                chunk = min(5.0, end_wait_t - time.time())
+                                if chunk > 0:
+                                    await asyncio.sleep(chunk)
+                            if bot_state.stop_requested:
+                                break
+                            print(f"AUTO-SIGNAL: ⏰ Time to send! "
+                                  f"{datetime.now().strftime('%H:%M:%S')} "
+                                  f"(entry at {entry_time_best.strftime('%H:%M:%S')})")
+                        else:
+                            print(f"AUTO-SIGNAL: signal_send_time "
+                                  f"{signal_send_time.strftime('%H:%M:%S')} already passed — "
+                                  f"sending immediately")
+                except Exception as e:
+                    print(f"AUTO-SIGNAL: wait calculation failed: {e} — sending immediately")
 
             # ── STEP 5: إرسال إشارة واحدة فقط (للزوج الفائز) ──
             # FIX #14: نمرر pre_analysis حتى لا يُعاد جلب الشموع وإعادة التحليل
