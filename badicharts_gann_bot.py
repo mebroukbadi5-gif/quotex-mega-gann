@@ -4301,6 +4301,14 @@ STRATEGY_INFO = {
 }
 
 STATS = {"wins": 0, "losses": 0}
+
+# SIGNAL_HISTORY: قائمة بنتائج كل إشارة (تُضاف بعد كل نتيجة)
+# كل entry = {time_str, symbol, dir_text, status, marker}
+# status: "WIN" / "MTG_WIN" / "LOSS"
+# marker: "✅" / "✅1" / "✖️"
+SIGNAL_HISTORY: List[Dict] = []
+SIGNALS_PER_REPORT = 10   # أرسل تقرير كل 10 إشارات
+HISTORY_FILE = Path(__file__).parent / ".badicharts_history.json"
 LIFECYCLE_TASKS: set = set()
 LAST_LIFECYCLE_TASK: Optional[asyncio.Task] = None
 LAST_SIGNAL_SENT_TIME: Optional[float] = None  # epoch seconds of last signal send
@@ -4337,7 +4345,88 @@ def save_stats():
         print(f"WARNING: failed to save stats: {e}")
 
 
+def load_history():
+    """يحمّل سجل الإشارات من ملف."""
+    global SIGNAL_HISTORY
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        SIGNAL_HISTORY = data if isinstance(data, list) else []
+    except Exception:
+        SIGNAL_HISTORY = []
+
+
+def save_history():
+    """يحفظ سجل الإشارات إلى ملف."""
+    try:
+        # احتفظ بآخر 200 إشارة فقط
+        SIGNAL_HISTORY_TRUNCATED = SIGNAL_HISTORY[-200:]
+        HISTORY_FILE.write_text(json.dumps(SIGNAL_HISTORY_TRUNCATED, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"WARNING: failed to save history: {e}")
+
+
+def build_history_report(last_n=10):
+    """يبني تقرير آخر N إشارة + إحصائيات تراكمية.
+
+    الصيغة (مطابقة لطلب المستخدم):
+        02:36 - EURUSD  -  CALL ✅
+        02:41 - CADJPY  -  CALL ✅1
+        02:44 - EURUSD  -  PUT  ✖️
+        ...
+        Win: 60 | Loss: 25 (71%)
+    """
+    if not SIGNAL_HISTORY:
+        return "📊 No signals yet."
+    lines = []
+    # خذ آخر N إشارة
+    recent = SIGNAL_HISTORY[-last_n:]
+    for entry in recent:
+        # كل سطر: HH:MM - SYMBOL  -  DIR  MARKER
+        # SYMBOL بدون _otc (EUR/USD بدل EURUSD_otc)
+        time_str = entry.get("time_str", "??:??")
+        symbol = entry.get("symbol", "?")
+        # تحويل EURUSD_otc → EURUSD  (أو EUR/USD لو 6 أحرف)
+        sym_clean = symbol.replace("_otc", "").upper()
+        if len(sym_clean) == 6 and sym_clean.isalpha():
+            sym_display = f"{sym_clean[:3]}/{sym_clean[3:]}"
+        else:
+            sym_display = sym_clean
+        dir_text = entry.get("dir_text", "?")  # "CALL" أو "PUT"
+        marker = entry.get("marker", "?")      # "✅" أو "✅1" أو "✖️"
+        # محاذاة: SYMBOL بعرض 7 + DIR بعرض 4
+        lines.append(f"{time_str} - {sym_display:<7} - {dir_text:<4} {marker}")
+    # إحصائيات تراكمية (كل التاريخ، ليس فقط آخر N)
+    total_wins = sum(1 for h in SIGNAL_HISTORY if h.get("status") in ("WIN", "MTG_WIN"))
+    total_losses = sum(1 for h in SIGNAL_HISTORY if h.get("status") == "LOSS")
+    total = total_wins + total_losses
+    win_rate = (total_wins / total * 100) if total else 0
+    lines.append("")
+    lines.append(f"Win: {total_wins} | Loss: {total_losses} ({win_rate:.0f}%)")
+    return "\n".join(lines)
+
+
+def add_to_history(sig, status):
+    """يضيف إشارة + نتيجتها إلى SIGNAL_HISTORY.
+
+    يُستدعى من _bd_signal_lifecycle بعد تحديد النتيجة.
+    """
+    global SIGNAL_HISTORY
+    entry = {
+        "time_str": sig["entry_time"].strftime("%H:%M"),
+        "symbol": sig["symbol"],
+        "dir_text": "CALL" if sig["direction"] == "BUY" else "PUT",
+        "status": status,
+        "marker": {"WIN": "✅", "MTG_WIN": "✅1", "LOSS": "✖️"}.get(status, "?"),
+    }
+    SIGNAL_HISTORY.append(entry)
+    # احتفظ بآخر 200 إشارة فقط في الذاكرة
+    if len(SIGNAL_HISTORY) > 200:
+        SIGNAL_HISTORY = SIGNAL_HISTORY[-200:]
+    save_history()
+
+
 load_stats()
+load_history()  # حمّل سجل الإشارات السابقة
 
 
 # ============================================================================
@@ -5238,6 +5327,29 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         else: STATS["wins"] += 1
         save_stats()
 
+        # ── GANN HISTORY: أضف الإشارة + نتيجتها إلى السجل ──
+        try:
+            add_to_history(sig, status)
+            history_count = len(SIGNAL_HISTORY)
+            print(f"HISTORY: added {status} for {sig['symbol']} (total: {history_count})")
+            # ── أرسل تقرير كل 10 إشارات ──
+            if history_count % SIGNALS_PER_REPORT == 0:
+                report = build_history_report(last_n=SIGNALS_PER_REPORT)
+                report_caption = (
+                    f"📊 GANN REPORT — آخر {SIGNALS_PER_REPORT} إشارات\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{report}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🏦 QUOTEX"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=report_caption)
+                    print(f"OUT report sent (every {SIGNALS_PER_REPORT} signals) — total signals: {history_count}")
+                except Exception as e:
+                    print(f"WARN: failed to send report: {e}")
+        except Exception as e:
+            print(f"WARN: add_to_history failed: {e}")
+
         # FIX #6: build the result caption with ENTRY candle and MARTINGALE candle
         # shown SEPARATELY. The old code passed `candles[-1]` which was the WRONG
         # candle in WIN and LOSS-with-martingale cases (it showed the martingale
@@ -5914,26 +6026,25 @@ async def stop_callback(update, context):
 # ============================================================================
 
 async def start_command(update, context):
-    """/start — register the chat_id automatically and show the strategy menu.
+    """/start — يعرض حالة البوت فقط (لا قوائم).
 
-    No prompts. The first chat that sends /start becomes the auto-signal
-    target. Subsequent /start from the SAME chat refreshes the menu.
+    البوت يعمل تلقائياً بمجرد إدخال chat_id من التيرمنال.
     """
-    global AUTO_SIGNAL_CHAT_ID
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
     print(f"IN  /start from chat_id={chat_id} (type={chat_type})")
-    if chat_type != "private":
-        await update.message.reply_text("⚠️ Please send /start in a PRIVATE chat.")
-        return
-    # Always register this chat as the target (override any previous one).
-    # If a different chat sends /start later, that one becomes the new target.
-    if not AUTO_SIGNAL_CHAT_ID or AUTO_SIGNAL_CHAT_ID != str(chat_id):
-        AUTO_SIGNAL_CHAT_ID = str(chat_id)
-        _bd_save_cache(CHATID_CACHE_FILE, AUTO_SIGNAL_CHAT_ID)
-        print(f"REGISTERED chat_id={chat_id} as auto-signal target")
-    text = build_welcome_message() + "\n🤖 Select a strategy to begin"
-    await update.message.reply_text(text=text, reply_markup=build_strategy_keyboard())
+    # اعرض رسالة الحالة فقط
+    status = build_status_message()
+    extra = (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 Signal mode: AUTO\n"
+        f"🎯 Target: {AUTO_SIGNAL_CHAT_ID or 'unset'}\n"
+        f"📊 History: {len(SIGNAL_HISTORY)} signals\n"
+        f"⏱️ Report every: {SIGNALS_PER_REPORT} signals\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Commands: /status /stop /id /resetstats"
+    )
+    await update.message.reply_text(status + extra)
 
 
 async def status_command(update, context):
@@ -6192,18 +6303,52 @@ def _connect_quotex_blocking(provider: LiveCandleProvider) -> bool:
         time.sleep(5)
 
 
-def main():
-    """Entry point: ask for Telegram token → CONNECT TO QUOTEX (blocking,
-    never gives up) → fetch candles for 13 pairs → run bot.
+def prompt_for_target_chat_id():
+    """يطلب chat_id من التيرمنال — هذا هو الـ chat_id الذي سيرسل إليه البوت الإشارات.
 
-    The chat_id is NOT asked here. The bot waits for /start from the user;
-    the first chat that sends /start becomes the auto-signal target.
-
-    The Quotex connection is established SYNCHRONOUSLY before the bot starts,
-    so by the time the bot is ready to receive /start, all 13 OTC pairs have
-    250 candles ready.
+    بالنسبة لقناة Telegram:
+      - chat_id = -100xxxxxxxxxx (رقم سالب يبدأ بـ -100)
+      - أو username القناة: @my_channel
+    كيف تحصل على chat_id القناة:
+      1. أضف البوت كمسؤول في القناة
+      2. أرسل أي رسالة في القناة
+      3. افتح https://api.telegram.org/bot<TOKEN>/getUpdates
+      4. ابحث عن "chat":{"id":-100xxxxxxxxxx}
     """
-    global TELEGRAM_BOT_TOKEN, candle_provider
+    print("=" * 60)
+    print("📞 ENTER TARGET CHAT_ID (القناة أو المحادثة التي سترسل إليها الإشارات)")
+    print("   - للقناة: -100xxxxxxxxxx (رقم سالب يبدأ بـ -100)")
+    print("   - أو username القناة: @my_channel")
+    print("   - اضغط Enter لتخطّي (يمكن إضافته لاحقاً عبر /start)")
+    print("=" * 60)
+    while True:
+        try:
+            chat_id = input("chat_id > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return None
+        if not chat_id:
+            return ""
+        # قبول: أرقام سالبة، أرقام موجبة، أو @username
+        if chat_id.startswith("@") or chat_id.lstrip("-").isdigit():
+            return chat_id
+        print("⚠ الصيغة غير صالحة. chat_id يجب أن يكون: رقم (مثل -1001234567890) أو @username")
+
+
+def main():
+    """Entry point: ask for Telegram token → Quotex credentials → CHAT_ID
+    → connect to Quotex → START SIGNAL LOOP IMMEDIATELY.
+
+    NEW FLOW (per user request):
+      1. Ask for Telegram bot token (cached)
+      2. Ask for Quotex credentials (cached)
+      3. Ask for target chat_id (where to send signals)
+      4. Connect to Quotex (blocking, never gives up)
+      5. Auto-select ALL 13 OTC pairs + Gann strategy
+      6. IMMEDIATELY start auto_signal_loop (NO menu, NO /start needed)
+      7. The bot polls for /stop command but signals are sent automatically
+    """
+    global TELEGRAM_BOT_TOKEN, candle_provider, AUTO_SIGNAL_CHAT_ID
 
     # 1) Telegram bot token
     if not TELEGRAM_BOT_TOKEN:
@@ -6215,51 +6360,87 @@ def main():
     # 2) Quotex credentials
     q_email, q_password, q_proxy = prompt_for_quotex_credentials()
     if not (q_email and q_password):
-        print("ERROR: Quotex credentials are REQUIRED. The bot only sends signals from real candles.")
+        print("ERROR: Quotex credentials are REQUIRED.")
         print("       Add them to credentials.json and re-run.")
         return
 
-    # 3) Purge old session (CRITICAL — Quotex rejects stale tokens!)
-    #    The original mega_fetch.py calls purge_old_session() before connecting.
-    #    This deletes session.json + browser/ dir so we get a fresh login.
+    # 3) Target chat_id (القناة التي سيرسل إليها الإشارات)
+    target_chat_id = prompt_for_target_chat_id()
+    if target_chat_id is None:
+        print("Aborted.")
+        return
+    if not target_chat_id:
+        print("⚠ لا يمكن بدء البوت بدون chat_id. أعد التشغيل وأدخل chat_id.")
+        return
+    AUTO_SIGNAL_CHAT_ID = target_chat_id
+    _bd_save_cache(CHATID_CACHE_FILE, AUTO_SIGNAL_CHAT_ID)
+    print(f"✓ target chat_id set: {AUTO_SIGNAL_CHAT_ID}")
+
+    # 4) Purge old Quotex session
     print("Purging old Quotex session (session.json + browser/)...")
     purge_old_session()
 
-    # 4) Create the LiveCandleProvider and connect SYNCHRONOUSLY before the bot starts.
-    #    This call NEVER returns until the connection succeeds and candles are fetched.
+    # 5) Connect to Quotex (blocking — never gives up)
     candle_provider = LiveCandleProvider(email=q_email, password=q_password, proxies=q_proxy or None)
     print(f"LiveCandleProvider initialized for {q_email}")
     _connect_quotex_blocking(candle_provider)
 
-    # 4) Start the Telegram bot — chat_id is registered automatically on /start
+    # 6) Auto-select ALL 13 OTC pairs + Gann strategy
+    bot_state.strategy = "quantvexa"   # GANN ENGINE
+    bot_state.selected_pairs = set(s for s, _ in PAIR_LIST)
+    bot_state.stop_requested = False
+    print(f"✓ Auto-selected: {len(bot_state.selected_pairs)} OTC pairs (all)")
+
+    # 7) Start the Telegram bot
     print("=" * 60)
-    print("STARTING BADICHARTS BOT")
+    print("STARTING GANN SIGNAL BOT (auto-signal mode)")
     print(f"   VERSION    : {BOT_VERSION}")
-    print(f"   ENGINE     : {bot_state.strategy.upper()}")
+    print(f"   ENGINE     : GANN (confluence-based)")
     print(f"   TIMEFRAME  : M1 (1 minute)")
-    print(f"   AUTO-SIGNAL: waits for /start to register chat_id")
-    print(f"   RESULTS    : {STATS['wins']}W / {STATS['losses']}L")
+    print(f"   TARGET     : {AUTO_SIGNAL_CHAT_ID}")
+    print(f"   PAIRS      : {len(bot_state.selected_pairs)} (ALL 13 OTC)")
+    print(f"   RESULTS    : {STATS['wins']}W / {STATS['losses']}L (history: {len(SIGNAL_HISTORY)})")
+    print(f"   REPORT     : every {SIGNALS_PER_REPORT} signals")
     print(f"   PROVIDER   : Quotex live (connected)")
     print("=" * 60)
+
     app = (Application.builder()
            .token(TELEGRAM_BOT_TOKEN)
            .post_init(post_init)
            .post_shutdown(post_shutdown)
            .read_timeout(60).write_timeout(60).connect_timeout(30).pool_timeout(30)
            .build())
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", start_command))
+    # فقط أوامر أساسية — لا قوائم اختيار
+    app.add_handler(CommandHandler("start", start_command))         # يعرض حالة فقط
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("resetstats", resetstats_command))
-    app.add_handler(CallbackQueryHandler(strategy_callback, pattern="^strat:"))
-    app.add_handler(CallbackQueryHandler(pair_callback, pattern="^pair:"))
-    app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    app.add_handler(CallbackQueryHandler(selectall_callback, pattern="^selectall$"))
-    app.add_handler(CallbackQueryHandler(clear_callback, pattern="^clear$"))
-    app.add_handler(CallbackQueryHandler(analyze_callback, pattern="^analyze$"))
-    app.add_handler(CallbackQueryHandler(stop_callback, pattern="^stop$"))
+    app.add_error_handler(error_handler)
+
+    # ابدأ حلقة الإشارات فوراً بعد بناء الـ app (في post_init)
+    async def _auto_start_signal_loop(application):
+        """يبدأ حلقة الإشارات تلقائياً بعد بدء البوت."""
+        await post_init(application)
+        # انتظر قليلاً ليستقر اتصال Telegram
+        await asyncio.sleep(2)
+        if AUTO_SIGNAL_CHAT_ID and bot_state.selected_pairs and not bot_state.active:
+            print(f"🚀 AUTO-STARTING signal loop → chat_id={AUTO_SIGNAL_CHAT_ID}")
+            await _bd_ensure_auto_signal_task(application)
+        else:
+            print(f"⚠ Cannot auto-start: chat_id={AUTO_SIGNAL_CHAT_ID}, pairs={len(bot_state.selected_pairs)}")
+
+    app = (Application.builder()
+           .token(TELEGRAM_BOT_TOKEN)
+           .post_init(_auto_start_signal_loop)
+           .post_shutdown(post_shutdown)
+           .read_timeout(60).write_timeout(60).connect_timeout(30).pool_timeout(30)
+           .build())
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("resetstats", resetstats_command))
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
