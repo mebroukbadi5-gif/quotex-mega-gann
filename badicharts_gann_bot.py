@@ -5017,6 +5017,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
     c1 = None
     c2 = None
     status = None
+    result_sent = False  # SAFETY NET: track if result photo was successfully sent
     try:
         base = sig["candles"]; n_base = len(base)
         reply0 = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
@@ -5361,6 +5362,7 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
             photo.seek(0)
             await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, read_timeout=60, write_timeout=60, connect_timeout=30)
         print(f"OUT result {status} for {sig['symbol']} (W{STATS['wins']}/L{STATS['losses']}) — lifecycle took {time.time() - lifecycle_start:.0f}s")
+        result_sent = True  # mark result as sent for safety net
 
         # ── HISTORY + REPORT: send AFTER result photo ──
         # This ensures the result screenshot is always sent before the report
@@ -5415,6 +5417,49 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         except Exception:
             pass
     finally:
+        # ── SAFETY NET: guarantee result is ALWAYS sent ──
+        # If result_sent is still False but status was determined,
+        # send a text-only result as last resort.
+        if not result_sent and status is not None:
+            print(f"SAFETY NET: result not sent for {sig['symbol']} — sending text-only fallback (status={status})")
+            try:
+                label = {"WIN": "WIN", "MTG_WIN": "MTG WIN", "LOSS": "LOSS"}[status]
+                won = status in ("WIN", "MTG_WIN")
+                payout_txt = f"+{sig['payout']}%" if won else "-100%"
+                fallback_text = (
+                    f"GANN RESULT\n"
+                    f"{LINE_SEP}\n"
+                    f"Asset: {pretty_symbol(sig['symbol'])}\n"
+                    f"Direction: {'CALL' if sig['direction']=='BUY' else 'PUT'}\n"
+                    f"Entry: {sig['entry_time'].strftime('%H:%M')}\n"
+                    f"{LINE_SEP}\n"
+                    f"Result: {label}\n"
+                    f"Payout: {payout_txt}\n"
+                    f"{LINE_SEP}\n"
+                    f"QUOTEX"
+                )
+                await bot.send_message(chat_id=chat_id, text=fallback_text)
+                # Still add to history since status was determined
+                try:
+                    add_to_history(sig, status)
+                    save_history()
+                    history_count = len(SIGNAL_HISTORY)
+                    print(f"SAFETY NET: added to history (total: {history_count})")
+                    if history_count % SIGNALS_PER_REPORT == 0:
+                        report = build_history_report(last_n=SIGNALS_PER_REPORT)
+                        report_caption = (
+                            f"GANN REPORT — Last {SIGNALS_PER_REPORT} Signals\n"
+                            f"{LINE_SEP}\n"
+                            f"{report}\n"
+                            f"{LINE_SEP}\n"
+                            f"QUOTEX"
+                        )
+                        await bot.send_message(chat_id=chat_id, text=report_caption)
+                except Exception:
+                    pass
+            except Exception as e2:
+                print(f"SAFETY NET FAILED for {sig['symbol']}: {e2}")
+        # Cleanup ticker + wait message
         if ticker is not None:
             ticker.cancel()
             try: await ticker
