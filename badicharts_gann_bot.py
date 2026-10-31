@@ -5517,7 +5517,22 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
                     f"{LINE_SEP}\n"
                     f"🏦 QUOTEX"
                 )
-                await bot.send_message(chat_id=chat_id, text=fallback_text)
+                # SAFETY NET: retry sending the text fallback (handles flood control)
+                safety_sent = False
+                for safety_attempt in range(3):
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=fallback_text)
+                        safety_sent = True
+                        break
+                    except RetryAfter as e:
+                        print(f"SAFETY NET: flood control, waiting {e.retry_after}s (attempt {safety_attempt+1}/3)")
+                        await asyncio.sleep(float(e.retry_after) + 1)
+                    except Exception as e:
+                        print(f"SAFETY NET: send attempt {safety_attempt+1}/3 failed: {e}")
+                        if safety_attempt < 2:
+                            await asyncio.sleep(5)
+                if not safety_sent:
+                    print(f"SAFETY NET FAILED for {sig['symbol']} — result could not be sent after 3 attempts")
                 # Still add to history since status was determined
                 try:
                     add_to_history(sig, status)
@@ -6039,7 +6054,20 @@ async def auto_signal_loop(application):
 
                 lifecycle_elapsed = time.time() - lifecycle_start
                 print(f"AUTO-SIGNAL: ✓ lifecycle CONFIRMED complete for {best['symbol']} (took {lifecycle_elapsed:.0f}s total)")
-                print(f"AUTO-SIGNAL: ✓ result photo should be visible in Telegram now. Starting next cycle...")
+                print(f"AUTO-SIGNAL: ✓ result photo should be visible in Telegram now.")
+                # MANDATORY DELAY: wait 15 seconds before next cycle to:
+                # 1. Let Telegram reset flood control limits
+                # 2. Ensure result photo is fully delivered to the channel
+                # 3. Give users time to see the result before the next signal
+                print(f"AUTO-SIGNAL: ⏸️  Mandatory 15s cooldown before next cycle (flood control prevention)...")
+                cooldown_end = time.time() + 15
+                while time.time() < cooldown_end:
+                    if bot_state.stop_requested:
+                        break
+                    chunk = min(3.0, cooldown_end - time.time())
+                    if chunk > 0:
+                        await asyncio.sleep(chunk)
+                print(f"AUTO-SIGNAL: ✓ Cooldown done. Starting next cycle...")
             except asyncio.CancelledError:
                 raise
 
