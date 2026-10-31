@@ -4699,9 +4699,14 @@ def render_signal_chart(candles, symbol, direction, payout=None, entry_time=None
     vx.set_xlim(x0,x1); vx.set_ylim(0, max(vol.max()*1.1, 1.0))
     for s in vx.spines.values(): s.set_visible(False)
     vx.set_yticks([])
+    # FIX: normalize volume bars so all are visible (minimum 5% of max height)
+    vol_max = max(vol.max(), 1.0)
+    min_bar = vol_max * 0.05  # minimum bar height = 5% of max
     for i in range(n):
         col = GREEN if c_[i] >= o[i] else RED
-        vx.add_patch(Rectangle((i-0.3, 0), 0.6, vol[i], facecolor=col, edgecolor="none", alpha=0.45))
+        # Ensure minimum visibility for small-volume candles
+        bar_h = max(vol[i], min_bar)
+        vx.add_patch(Rectangle((i-0.3, 0), 0.6, bar_h, facecolor=col, edgecolor="none", alpha=0.55))
     tp = list(range(0, n, 3)); vx.set_xticks(tp); vx.set_xticklabels([times[i].strftime("%H:%M") for i in tp])
     vx.tick_params(axis="x", colors=DIM, labelsize=8.5, length=0, pad=6)
     for lab in vx.get_xticklabels(): lab.set_family(MONO)
@@ -5034,18 +5039,15 @@ def _bd_secs_left(target):
 
 
 async def _bd_wait_ticker(bot, chat_id, msg_id, state):
-    while True:
-        await asyncio.sleep(WAIT_TICK_SECONDS)
-        text = _bd_wait_caption(_bd_secs_left(state["target"]), state["label"])
-        try:
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text)
-        except asyncio.CancelledError:
-            raise
-        except RetryAfter as e:
-            await asyncio.sleep(float(e.retry_after))
-        except Exception as e:
-            if "not modified" not in str(e).lower():
-                print(f"wait counter edit skipped: {e}")
+    """DEPRECATED — no longer edits the message.
+    
+    Telegram shows 'edited' label on any edited message. To avoid this,
+    we now send ONE static message and don't update it.
+    This function is kept for compatibility but does nothing.
+    """
+    # Do nothing — the wait message stays static (no 'edited' label)
+    # The user knows the entry time from the signal caption
+    return
 
 
 async def _bd_signal_lifecycle(bot, chat_id, sig, message):
@@ -5072,9 +5074,18 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
     try:
         base = sig["candles"]; n_base = len(base)
         reply0 = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
-        text = _bd_wait_caption(_bd_secs_left(state["target"]), state["label"])
+        # FIX: send ONE static wait message — NO editing (avoids 'edited' label + flood control)
+        # The user knows the entry time from the signal caption, so no countdown needed.
+        wait_text = f"⏳ Waiting for entry at {sig['entry_time'].strftime('%H:%M:%S')}..."
         try:
-            wait_msg = await bot.send_message(chat_id=chat_id, text=text, reply_parameters=reply0)
+            wait_msg = await bot.send_message(chat_id=chat_id, text=wait_text, reply_parameters=reply0)
+        except RetryAfter as e:
+            print(f"Flood control on wait message: waiting {e.retry_after}s")
+            await asyncio.sleep(float(e.retry_after) + 1)
+            try:
+                wait_msg = await bot.send_message(chat_id=chat_id, text=wait_text, reply_parameters=reply0)
+            except Exception:
+                wait_msg = None
         except Exception as e:
             pass
         if wait_msg is not None:
@@ -5407,11 +5418,29 @@ async def _bd_signal_lifecycle(bot, chat_id, sig, message):
         result_caption = build_result_caption(sig, status, c1, mtg_candle_for_caption)
         reply = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
         feedback_kb = build_feedback_keyboard()  # GOOD/BAD buttons under result only
-        try:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=feedback_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
-        except Exception as e:
-            photo.seek(0)
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=feedback_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+        # FIX: Retry logic with RetryAfter handling to prevent lost results
+        send_ok = False
+        for send_attempt in range(3):  # max 3 retries
+            try:
+                photo.seek(0)
+                await bot.send_photo(chat_id=chat_id, photo=photo, caption=result_caption, reply_parameters=reply, reply_markup=feedback_kb, read_timeout=60, write_timeout=60, connect_timeout=30)
+                send_ok = True
+                break
+            except RetryAfter as e:
+                print(f"FLOOD CONTROL on result photo: waiting {e.retry_after}s (attempt {send_attempt+1}/3)")
+                await asyncio.sleep(float(e.retry_after) + 1)
+            except Exception as e:
+                print(f"Result send attempt {send_attempt+1}/3 failed: {e}")
+                if send_attempt < 2:
+                    await asyncio.sleep(5)  # wait 5s before retry
+        if not send_ok:
+            # Final fallback: send text-only result
+            print(f"RESULT PHOTO FAILED for {sig['symbol']} — sending text-only")
+            try:
+                await bot.send_message(chat_id=chat_id, text=result_caption)
+                send_ok = True
+            except Exception as e2:
+                print(f"Text fallback also failed: {e2}")
         print(f"OUT result {status} for {sig['symbol']} (W{STATS['wins']}/L{STATS['losses']}) — lifecycle took {time.time() - lifecycle_start:.0f}s")
         result_sent = True  # mark result as sent for safety net
 
